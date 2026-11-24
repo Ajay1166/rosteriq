@@ -5,7 +5,10 @@ import {
   ImpactAnalysisResult, SPOFRisk
 } from '../types';
 
-const API_BASE = (import.meta as any).env?.VITE_API_URL || 'http://127.0.0.1:8000/api';
+const rawApiBase = (import.meta as any).env?.VITE_API_URL || 'http://127.0.0.1:8000/api';
+// Normalize API_BASE: remove trailing slashes and ensure /api path is present
+const cleanBase = rawApiBase.replace(/\/+$/, '');
+const API_BASE = cleanBase.endsWith('/api') ? cleanBase : `${cleanBase}/api`;
 
 const client = axios.create({
   baseURL: API_BASE,

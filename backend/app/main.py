@@ -39,18 +39,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# API Routers
-app.include_router(employees.router, prefix=settings.API_V1_STR)
-app.include_router(brands.router, prefix=settings.API_V1_STR)
-app.include_router(processes.router, prefix=settings.API_V1_STR)
-app.include_router(pods.router, prefix=settings.API_V1_STR)
-app.include_router(assignments.router, prefix=settings.API_V1_STR)
-app.include_router(availability.router, prefix=settings.API_V1_STR)
-app.include_router(holidays.router, prefix=settings.API_V1_STR)
-app.include_router(rosters.router, prefix=settings.API_V1_STR)
-app.include_router(impact.router, prefix=settings.API_V1_STR)
-app.include_router(analytics.router, prefix=settings.API_V1_STR)
-app.include_router(exports.router, prefix=settings.API_V1_STR)
+# API Routers with primary /api prefix
+routers = [
+    employees.router, brands.router, processes.router, pods.router,
+    assignments.router, availability.router, holidays.router,
+    rosters.router, impact.router, analytics.router, exports.router
+]
+
+for r in routers:
+    app.include_router(r, prefix=settings.API_V1_STR)
+    # Also support requests without /api prefix for flexibility across deployment configurations
+    app.include_router(r, prefix="", include_in_schema=False)
+
 
 @app.get("/health")
 def health_check():
