@@ -14,3 +14,20 @@ services:
         sync: false
       - key: ENVIRONMENT
         value: production
+
+  # Frontend React Vite Static Site
+  - type: web
+    name: rosteriq-frontend
+    env: static
+    region: oregon
+    plan: free
+    rootDir: frontend
+    buildCommand: "npm install && npm run build"
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        sync: false

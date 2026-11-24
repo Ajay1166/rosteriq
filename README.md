@@ -275,35 +275,74 @@ Open `http://localhost:5173` in your browser.
 
 ---
 
-## 9. Production Deployment Configuration
+## 9. Production Deployment Guide: Supabase & Render
 
-### 1. Database (Supabase PostgreSQL)
-1. Create a new Supabase project.
-2. In Project Settings > Database, copy the Connection String URI.
-3. In `backend/.env`, set:
-   ```env
-   DATABASE_URL=postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres
+### Step 1: Database Setup on Supabase
+
+1. Go to [supabase.com](https://supabase.com) and create or open your project.
+2. In your Supabase Dashboard, navigate to **Project Settings** > **Database**.
+3. Under **Connection string**, select **URI**:
+   - **Direct connection (Port 5432)**:
+     ```text
+     postgresql://postgres:[YOUR-PASSWORD]@db.[YOUR-PROJECT-REF].supabase.co:5432/postgres?sslmode=require
+     ```
+   - **Transaction pooler / Supavisor (Port 6543 - Recommended)**:
+     ```text
+     postgresql://postgres.[YOUR-PROJECT-REF]:[YOUR-PASSWORD]@aws-0-[YOUR-REGION].pooler.supabase.com:6543/postgres?sslmode=require
+     ```
+4. *(Optional verification)* You can test and seed your Supabase database from your local machine:
+   ```bash
+   python backend/connect_supabase.py "postgresql://postgres:[YOUR-PASSWORD]@db.[YOUR-PROJECT-REF].supabase.co:5432/postgres"
    ```
-4. Run `python -m app.seed` to initialize the schema and populate seed data.
+   This automatically verifies the connection, synchronizes all 12 tables, and seeds the initial dataset (30 employees, 25 brands, 5 pods, 7 processes, and calendar rules).
 
-### 2. Backend (Render)
-1. Link your GitHub repository to Render.
-2. Create a new **Web Service** using `render.yaml` or manual configuration:
-   - **Root Directory**: `backend`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-   - **Environment Variable**: `DATABASE_URL` set to your Supabase PostgreSQL URI.
-3. Health check path: `/health`.
+---
 
-### 3. Frontend (Vercel)
-1. Import repository into Vercel.
-2. Set **Root Directory** to `frontend`.
-3. Set **Framework Preset** to `Vite`.
-4. Environment variable:
-   ```env
-   VITE_API_URL=https://your-backend-service.onrender.com/api
-   ```
-5. Deploy. SPA routing is managed via `frontend/vercel.json`.
+### Step 2: 1-Click Deployment on Render (Blueprint)
+
+RosterIQ includes a turnkey `render.yaml` blueprint defining both the FastAPI backend and React frontend:
+
+1. Log in to [render.com](https://render.com).
+2. Click **New +** > **Blueprint**.
+3. Connect your GitHub repository: `https://github.com/Ajay1166/rosteriq`.
+4. Render will detect `render.yaml` and configure two services:
+   - **`rosteriq-backend`** (Python FastAPI Web Service)
+   - **`rosteriq-frontend`** (Static Site with SPA rewrite rules)
+5. Under Environment Variables for `rosteriq-backend`:
+   - Set `DATABASE_URL` to your Supabase PostgreSQL URI from Step 1.
+   - Set `ENVIRONMENT` to `production`.
+6. Under Environment Variables for `rosteriq-frontend`:
+   - Set `VITE_API_URL` to `https://rosteriq-backend.onrender.com/api` (or your backend's Render domain).
+7. Click **Apply**.
+8. Render will build and deploy both services. On startup, the backend automatically verifies tables and seeds initial data in Supabase.
+
+---
+
+### Manual Deployment on Render (Alternative)
+
+If you prefer deploying services individually:
+
+#### Backend Service:
+- **Type**: Web Service
+- **Name**: `rosteriq-backend`
+- **Root Directory**: `backend`
+- **Environment**: Python
+- **Build Command**: `pip install -r requirements.txt`
+- **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- **Health Check Path**: `/health`
+- **Environment Variables**:
+  - `DATABASE_URL`: `postgresql://postgres:[PASSWORD]@db.[PROJECT-REF].supabase.co:5432/postgres?sslmode=require`
+  - `ENVIRONMENT`: `production`
+
+#### Frontend Service:
+- **Type**: Static Site
+- **Name**: `rosteriq-frontend`
+- **Root Directory**: `frontend`
+- **Build Command**: `npm install && npm run build`
+- **Publish Directory**: `dist`
+- **Rewrite Rules**: Source `/*` -> Destination `/index.html` (for client-side routing)
+- **Environment Variables**:
+  - `VITE_API_URL`: `https://rosteriq-backend.onrender.com/api`
 
 ---
 
