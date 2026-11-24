@@ -114,18 +114,134 @@ export const RosterPlanner: React.FC = () => {
     }
   };
 
+  // Confirmation Dialog State
+  const [confirmModal, setConfirmModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    description: string;
+    action: () => Promise<void>;
+    confirmText: string;
+    isDestructive?: boolean;
+  }>({
+    isOpen: false,
+    title: '',
+    description: '',
+    action: async () => {},
+    confirmText: 'Confirm',
+    isDestructive: false
+  });
+
+  const handleClearValidationResults = () => {
+    if (!currentRoster) return;
+    setConfirmModal({
+      isOpen: true,
+      title: 'Clear Previous Validation Results?',
+      description: 'This will remove all unresolved validation conflict records for this roster version. Active assignments, employee profiles, leaves, and holidays will NOT be deleted.',
+      confirmText: 'Clear Results',
+      isDestructive: false,
+      action: async () => {
+        setActionLoading(true);
+        try {
+          const res = await api.clearRosterConflicts(currentRoster.id);
+          showToast('success', res.message || 'Validation results cleared.');
+          loadRosters();
+        } catch (err: any) {
+          showToast('error', err.response?.data?.detail || 'Failed to clear validation results');
+        } finally {
+          setActionLoading(false);
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        }
+      }
+    });
+  };
+
+  const handleResetDraft = () => {
+    if (!currentRoster) return;
+    if (currentRoster.status === 'Published') {
+      showToast('error', 'Cannot reset a published roster. Published rosters are immutable history.');
+      return;
+    }
+    setConfirmModal({
+      isOpen: true,
+      title: 'Reset Draft Roster?',
+      description: 'Are you sure you want to reset this draft roster? This will clear all draft assignments and conflict records for this draft version. Published history is preserved.',
+      confirmText: 'Reset Draft to Blank',
+      isDestructive: true,
+      action: async () => {
+        setActionLoading(true);
+        try {
+          const res = await api.resetDraftRoster(currentRoster.id);
+          showToast('success', res.message || 'Draft roster reset.');
+          loadRosters();
+        } catch (err: any) {
+          showToast('error', err.response?.data?.detail || 'Failed to reset draft roster');
+        } finally {
+          setActionLoading(false);
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        }
+      }
+    });
+  };
+
+  const handleRegenerateDraft = () => {
+    if (!currentRoster) return;
+    if (currentRoster.status === 'Published') {
+      showToast('error', 'Cannot regenerate a published roster. Please generate a new draft version instead.');
+      return;
+    }
+    setConfirmModal({
+      isOpen: true,
+      title: 'Regenerate Draft Roster?',
+      description: 'This will re-run the deterministic scheduling engine for this draft roster, rebuilding assignments and executing independent validation.',
+      confirmText: 'Regenerate & Validate',
+      isDestructive: false,
+      action: async () => {
+        setActionLoading(true);
+        try {
+          const res = await api.regenerateRoster(currentRoster.id, 'Aditi Deshmukh (Lead)');
+          showToast('success', res.message || 'Draft regenerated and validated.');
+          loadRosters();
+        } catch (err: any) {
+          showToast('error', err.response?.data?.detail || 'Failed to regenerate draft');
+        } finally {
+          setActionLoading(false);
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        }
+      }
+    });
+  };
+
   const handlePublishRoster = async () => {
     if (!currentRoster) return;
-    setActionLoading(true);
-    try {
-      await api.publishRoster(currentRoster.id, 'Aditi Deshmukh');
-      showToast('success', 'Roster published successfully! Schedule is now locked for operations.');
-      loadRosters();
-    } catch (err: any) {
-      showToast('error', err.response?.data?.detail || 'Publication rejected. Critical conflicts must be resolved first.');
-    } finally {
-      setActionLoading(false);
+    if (currentRoster.status === 'Published') {
+      showToast('info', 'This roster version is already published.');
+      return;
     }
+    if ((currentRoster.critical_conflicts || 0) > 0) {
+      showToast('error', `Publication rejected: Roster has ${currentRoster.critical_conflicts} critical unresolved conflict(s). Resolve all critical gaps before publishing.`);
+      return;
+    }
+
+    setConfirmModal({
+      isOpen: true,
+      title: 'Publish Final Roster?',
+      description: `Publish Version ${currentRoster.version} for operations? This will lock the roster and create an immutable historical version snapshot.`,
+      confirmText: 'Publish & Lock',
+      isDestructive: false,
+      action: async () => {
+        setActionLoading(true);
+        try {
+          await api.publishRoster(currentRoster.id, 'Aditi Deshmukh');
+          showToast('success', 'Roster published successfully! Schedule is now locked for operations.');
+          loadRosters();
+        } catch (err: any) {
+          showToast('error', err.response?.data?.detail || 'Publication rejected. Critical conflicts must be resolved first.');
+        } finally {
+          setActionLoading(false);
+          setConfirmModal(prev => ({ ...prev, isOpen: false }));
+        }
+      }
+    });
   };
 
   const handleOpenEditCell = (empName: string, empId: number, cell: GridCell) => {
@@ -213,43 +329,92 @@ export const RosterPlanner: React.FC = () => {
           </div>
 
           {/* Action Buttons */}
-          <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={handleGenerateRoster}
               disabled={actionLoading}
-              className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-md shadow-blue-500/20 transition flex items-center gap-1.5 disabled:opacity-50"
+              className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold text-xs shadow-md shadow-blue-500/20 transition flex items-center gap-1.5 disabled:opacity-50"
+              title="Generate new draft version"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              Generate Roster
+              New Draft
             </button>
 
             {currentRoster && (
               <>
+                {currentRoster.status !== 'Published' && (
+                  <button
+                    onClick={handleRegenerateDraft}
+                    disabled={actionLoading}
+                    className="px-3 py-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold text-xs border border-indigo-200 transition flex items-center gap-1.5"
+                    title="Regenerate this draft roster"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    Regenerate
+                  </button>
+                )}
+
                 <button
                   onClick={handleValidateRoster}
                   disabled={actionLoading}
-                  className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs border border-slate-300 transition flex items-center gap-1.5"
+                  className="px-3 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs border border-slate-300 transition flex items-center gap-1.5"
+                  title="Run independent validation engine"
                 >
                   <ShieldCheck className="w-4 h-4 text-blue-600" />
-                  Validate Engine
+                  Validate
                 </button>
 
                 <button
+                  onClick={handleClearValidationResults}
+                  disabled={actionLoading}
+                  className="px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold text-xs border border-amber-200 transition flex items-center gap-1.5"
+                  title="Clear unresolved validation conflicts"
+                >
+                  <AlertOctagon className="w-3.5 h-3.5 text-amber-600" />
+                  Clear Results
+                </button>
+
+                {currentRoster.status !== 'Published' && (
+                  <button
+                    onClick={handleResetDraft}
+                    disabled={actionLoading}
+                    className="px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-semibold text-xs border border-rose-200 transition flex items-center gap-1.5"
+                    title="Reset draft assignments to blank slate"
+                  >
+                    <X className="w-3.5 h-3.5 text-rose-600" />
+                    Reset Draft
+                  </button>
+                )}
+
+                <button
                   onClick={handlePublishRoster}
-                  disabled={actionLoading || currentRoster.status === 'Published'}
-                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs shadow-md shadow-emerald-500/20 transition flex items-center gap-1.5 disabled:opacity-40"
+                  disabled={actionLoading || currentRoster.status === 'Published' || (currentRoster.critical_conflicts || 0) > 0}
+                  className={`px-3.5 py-2 rounded-xl font-semibold text-xs shadow-md transition flex items-center gap-1.5 ${
+                    currentRoster.status === 'Published'
+                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                      : (currentRoster.critical_conflicts || 0) > 0
+                        ? 'bg-red-50 text-red-600 border border-red-200 cursor-not-allowed'
+                        : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-500/20'
+                  }`}
+                  title={
+                    currentRoster.status === 'Published'
+                      ? 'Roster is already published'
+                      : (currentRoster.critical_conflicts || 0) > 0
+                        ? `Cannot publish: ${currentRoster.critical_conflicts} critical gaps must be resolved`
+                        : 'Publish and lock this roster version'
+                  }
                 >
                   <CheckCircle className="w-4 h-4" />
-                  Publish Roster
+                  {currentRoster.status === 'Published' ? 'Published' : 'Publish Roster'}
                 </button>
 
                 <a
                   href={api.getRosterExportUrl(currentRoster.id)}
                   download
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-semibold text-xs transition flex items-center gap-1.5"
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-900 text-white font-semibold text-xs transition flex items-center gap-1.5"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  Export CSV
+                  Export
                 </a>
               </>
             )}
@@ -531,6 +696,46 @@ export const RosterPlanner: React.FC = () => {
               >
                 Save & Revalidate
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Confirmation Modal for Destructive/Publish Actions */}
+      {confirmModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-6">
+              <div className="flex items-center gap-3 mb-3">
+                <div className={`p-2.5 rounded-xl ${confirmModal.isDestructive ? 'bg-rose-100 text-rose-700' : 'bg-blue-100 text-blue-700'}`}>
+                  {confirmModal.isDestructive ? <AlertTriangle className="w-5 h-5" /> : <ShieldCheck className="w-5 h-5" />}
+                </div>
+                <h3 className="text-base font-bold text-slate-900">{confirmModal.title}</h3>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed mb-6">
+                {confirmModal.description}
+              </p>
+              <div className="flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setConfirmModal(prev => ({ ...prev, isOpen: false }))}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition"
+                  disabled={actionLoading}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmModal.action}
+                  disabled={actionLoading}
+                  className={`px-4 py-2 rounded-xl text-xs font-semibold text-white shadow-md transition flex items-center gap-1.5 ${
+                    confirmModal.isDestructive
+                      ? 'bg-rose-600 hover:bg-rose-700 shadow-rose-500/20'
+                      : 'bg-blue-600 hover:bg-blue-700 shadow-blue-500/20'
+                  }`}
+                >
+                  {confirmModal.confirmText}
+                </button>
+              </div>
             </div>
           </div>
         </div>

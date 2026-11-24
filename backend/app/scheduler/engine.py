@@ -28,7 +28,48 @@ class RosterSchedulerEngine:
         """
         Deterministic, constraint-based scheduling engine.
         Follows the 12-step scheduling procedure from Part 9.
+        Creates a new draft version.
         """
+        existing_roster = self.db.query(Roster).filter(
+            Roster.month == month,
+            Roster.year == year,
+            Roster.pod_id == pod_id,
+            Roster.brand_id == brand_id
+        ).order_by(Roster.version.desc()).first()
+
+        new_version = (existing_roster.version + 1) if existing_roster else 1
+
+        roster = Roster(
+            month=month,
+            year=year,
+            version=new_version,
+            status="Draft",
+            generated_date=datetime.utcnow(),
+            generated_by=generated_by,
+            validation_status="Needs Review",
+            pod_id=pod_id,
+            brand_id=brand_id
+        )
+        self.db.add(roster)
+        self.db.flush()
+        return self._populate_roster(roster, generated_by)
+
+    def regenerate_roster(self, roster: Roster, generated_by: str = "Operations Lead") -> Roster:
+        """
+        Clears old draft assignments and validation conflicts for this roster
+        and re-runs deterministic generation.
+        """
+        self.db.query(RosterAssignment).filter(RosterAssignment.roster_id == roster.id).delete()
+        self.db.query(SchedulingConflict).filter(SchedulingConflict.roster_id == roster.id).delete()
+        self.db.flush()
+        return self._populate_roster(roster, generated_by)
+
+    def _populate_roster(self, roster: Roster, generated_by: str) -> Roster:
+        month = roster.month
+        year = roster.year
+        pod_id = roster.pod_id
+        brand_id = roster.brand_id
+
         # 1. Fetch reference data
         num_days = calendar.monthrange(year, month)[1]
         dates = [date(year, month, day) for day in range(1, num_days + 1)]
@@ -74,30 +115,6 @@ class RosterSchedulerEngine:
             EmployeeAvailability.date <= end_date
         ).all()
 
-        # 2. Check if a roster already exists for this month/year/filters
-        existing_roster = self.db.query(Roster).filter(
-            Roster.month == month,
-            Roster.year == year,
-            Roster.pod_id == pod_id,
-            Roster.brand_id == brand_id
-        ).order_by(Roster.version.desc()).first()
-
-        new_version = (existing_roster.version + 1) if existing_roster else 1
-
-        roster = Roster(
-            month=month,
-            year=year,
-            version=new_version,
-            status="Draft",
-            generated_date=datetime.utcnow(),
-            generated_by=generated_by,
-            validation_status="Needs Review",
-            pod_id=pod_id,
-            brand_id=brand_id
-        )
-        self.db.add(roster)
-        self.db.flush()
-
         # Map employee assignments by (brand_id, process_id) -> list of EmployeeAssignment
         brand_proc_assignments: Dict[Tuple[int, int], List[EmployeeAssignment]] = defaultdict(list)
         # Also map employee_id -> list of (brand_id, process_id)
@@ -109,6 +126,7 @@ class RosterSchedulerEngine:
 
         # Track monthly working days per employee for workload balance
         employee_workload: Dict[int, int] = defaultdict(int)
+        emp_consecutive_days: Dict[int, int] = defaultdict(int)
 
         generated_assignments: List[RosterAssignment] = []
         conflicts_to_create: List[SchedulingConflict] = []
@@ -128,8 +146,12 @@ class RosterSchedulerEngine:
             for b in all_brands:
                 for p in all_processes:
                     rule = rule_map.get((b.id, p.id))
+                    has_assignments = (b.id, p.id) in brand_proc_assignments and len(brand_proc_assignments[(b.id, p.id)]) > 0
                     if not rule:
-                        # Fallback default rule: 365 days, 1 employee
+                        if not has_assignments:
+                            # Brand does not operate this process
+                            continue
+                        # Fallback default rule only if assignments exist but no explicit rule
                         rule = OperatingRule(
                             brand_id=b.id,
                             process_id=p.id,
@@ -139,6 +161,8 @@ class RosterSchedulerEngine:
                             shift_start_time="09:00",
                             shift_end_time="18:00"
                         )
+                    elif rule.min_required_employees <= 0:
+                        continue
                     
                     is_op, _ = is_operating_day(rule, cur_date, b.code, holidays)
                     if is_op:
@@ -169,41 +193,31 @@ class RosterSchedulerEngine:
                     covered_required_slots += min_req
                     continue
 
-                # Filter eligible employees who are available
+                # 1. Primary assigned candidates
                 candidate_pool = []
                 for ea in eligible_eas:
                     emp = emp_map.get(ea.employee_id)
                     if not emp:
                         continue
-
-                    # Already working on another brand today?
                     if emp.id in emp_assigned_today:
                         if emp_assigned_today[emp.id] != brand.id:
-                            continue # Incompatible brand shift overlap
-
-                    # Hard unavailability check
-                    is_hard_unavail, reason = ConstraintChecker.is_employee_hard_unavailable(
+                            continue
+                    is_hard_unavail, _ = ConstraintChecker.is_employee_hard_unavailable(
                         emp, cur_date, availabilities
                     )
                     if is_hard_unavail:
                         continue
 
-                    # Soft constraint score
                     is_pref_off = ConstraintChecker.is_preferred_weekly_off(emp, cur_date)
                     current_shifts = employee_workload[emp.id]
-                    # Score calculation: lower score is assigned first
-                    # Priority 1 is preferred over Priority 2
-                    # Working on preferred off has penalty 100
-                    # Current workload penalty 10 per prior shift
-                    score = (ea.priority * 10) + (100 if is_pref_off else 0) + (current_shifts * 2)
-                    candidate_pool.append((score, is_pref_off, emp, ea))
+                    score = (ea.priority * 10) + (80 if is_pref_off else 0) + (current_shifts * 2)
+                    candidate_pool.append((score, is_pref_off, emp, "primary"))
 
-                # Sort by score ascending (best candidate first)
                 candidate_pool.sort(key=lambda x: x[0])
 
                 # Assign needed candidates
                 assigned_count = 0
-                for score, is_pref_off, emp, ea in candidate_pool:
+                for score, is_pref_off, emp, role_source in candidate_pool:
                     if assigned_count >= needed:
                         break
                     
@@ -215,13 +229,13 @@ class RosterSchedulerEngine:
                             emp_assigned_today[emp.id] = brand.id
                             employee_workload[emp.id] += 1
 
-                            # If this employee also covers other processes of the same brand, link them!
+                            # Employee covers the processes of this brand they are allocated to
                             for (b_id, p_id) in emp_capabilities.get(emp.id, []):
-                                if b_id == brand.id and p_id != process.id:
+                                if b_id == brand.id:
                                     if emp.id not in proc_coverage_today[(b_id, p_id)]:
                                         proc_coverage_today[(b_id, p_id)].append(emp.id)
 
-                            # Create RosterAssignment record for employee
+                            note_text = f"Assigned to {brand.name} - {process.name}" if role_source == "primary" else f"Pod Backup for {brand.name} - {process.name}"
                             ra = RosterAssignment(
                                 roster_id=roster.id,
                                 employee_id=emp.id,
@@ -232,24 +246,9 @@ class RosterSchedulerEngine:
                                 shift_end=rule.shift_end_time,
                                 work_status="Working",
                                 assignment_source="automatic",
-                                notes=f"Assigned to {brand.name} - {process.name}"
+                                notes=note_text
                             )
                             generated_assignments.append(ra)
-
-                            # If assigned on preferred weekly off, log a WARNING conflict
-                            if is_pref_off:
-                                conflicts_to_create.append(SchedulingConflict(
-                                    roster_id=roster.id,
-                                    severity="WARNING",
-                                    date=cur_date,
-                                    brand_id=brand.id,
-                                    process_id=process.id,
-                                    employee_id=emp.id,
-                                    expected_staffing=min_req,
-                                    actual_staffing=len(proc_coverage_today[(brand.id, process.id)]),
-                                    explanation=f"{emp.full_name} scheduled on preferred weekly off ({cur_date.strftime('%A')}) to meet coverage for {brand.name}.",
-                                    suggested_resolution="If possible, allocate a cross-pod or backup resource to restore weekly off."
-                                ))
 
                 # Count coverage
                 current_staffing = len(proc_coverage_today[(brand.id, process.id)])
@@ -322,9 +321,15 @@ class RosterSchedulerEngine:
                     )
                     generated_assignments.append(ra)
 
-        # Bulk save assignments and conflicts
+            # Update consecutive working days tracker for all employees
+            for emp in all_employees:
+                if emp.id in emp_assigned_today:
+                    emp_consecutive_days[emp.id] += 1
+                else:
+                    emp_consecutive_days[emp.id] = 0
+
+        # Bulk save assignments
         self.db.bulk_save_objects(generated_assignments)
-        self.db.bulk_save_objects(conflicts_to_create)
         self.db.commit()
 
         # Step 11: Run independent validation engine

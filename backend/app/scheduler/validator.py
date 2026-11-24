@@ -25,6 +25,16 @@ class RosterValidator:
         if not roster:
             raise ValueError(f"Roster {roster_id} not found")
 
+        # Collect existing resolved conflicts so manager overrides are preserved
+        resolved_conflicts = self.db.query(SchedulingConflict).filter(
+            SchedulingConflict.roster_id == roster_id,
+            SchedulingConflict.resolved == True
+        ).all()
+        resolved_lookup = {
+            (c.date, c.brand_id, c.process_id, c.employee_id, c.severity): c.resolution_notes
+            for c in resolved_conflicts
+        }
+
         # Clear existing un-resolved auto conflicts for this roster
         self.db.query(SchedulingConflict).filter(
             SchedulingConflict.roster_id == roster_id,
@@ -53,8 +63,10 @@ class RosterValidator:
         # Active assignments
         active_assignments = self.db.query(EmployeeAssignment).filter(EmployeeAssignment.active == True).all()
         emp_brand_procs: Dict[int, Set[Tuple[int, int]]] = defaultdict(set)
+        brand_assigned_emps: Dict[int, Set[int]] = defaultdict(set)
         for ea in active_assignments:
             emp_brand_procs[ea.employee_id].add((ea.brand_id, ea.process_id))
+            brand_assigned_emps[ea.brand_id].add(ea.employee_id)
 
         # Stored roster assignments
         assignments = self.db.query(RosterAssignment).filter(
@@ -69,12 +81,19 @@ class RosterValidator:
 
         for ra in assignments:
             date_emp_assignments[(ra.date, ra.employee_id)].append(ra)
-            if ra.work_status == "Working" and ra.brand_id and ra.process_id:
-                brand_proc_coverage[(ra.date, ra.brand_id, ra.process_id)].add(ra.employee_id)
+            if ra.work_status == "Working" and ra.brand_id:
+                if ra.process_id:
+                    brand_proc_coverage[(ra.date, ra.brand_id, ra.process_id)].add(ra.employee_id)
                 # If employee is allocated to other processes of the same brand, count them as covered too
                 for (b_id, p_id) in emp_brand_procs.get(ra.employee_id, []):
                     if b_id == ra.brand_id:
                         brand_proc_coverage[(ra.date, b_id, p_id)].add(ra.employee_id)
+
+                # For single-resource brands (<=1 primary assigned employee), a scheduled working shift covers all operating processes of that brand
+                if len(brand_assigned_emps.get(ra.brand_id, set())) <= 1:
+                    for (b_id, p_id) in all_rules.keys():
+                        if b_id == ra.brand_id:
+                            brand_proc_coverage[(ra.date, b_id, p_id)].add(ra.employee_id)
 
         conflicts: List[SchedulingConflict] = []
         total_required_slots = 0
@@ -88,15 +107,22 @@ class RosterValidator:
             target_brands = [b for b in target_brands if b.assigned_pod_id == roster.pod_id]
 
         # 1. Coverage Validation per Operating Brand & Process
+        assigned_brand_procs = {(ea.brand_id, ea.process_id) for ea in active_assignments}
         for cur_date in dates:
             for b in target_brands:
                 for p in all_processes.values():
                     rule = all_rules.get((b.id, p.id))
+                    has_assignments = (b.id, p.id) in assigned_brand_procs
                     if not rule:
+                        if not has_assignments:
+                            # Brand does not operate this process
+                            continue
                         rule = OperatingRule(
                             brand_id=b.id, process_id=p.id, operating_mode="365_DAYS",
                             min_required_employees=1, max_required_employees=1
                         )
+                    elif rule.min_required_employees <= 0:
+                        continue
 
                     is_op, op_reason = is_operating_day(rule, cur_date, b.code, holidays)
                     if is_op:
@@ -247,15 +273,31 @@ class RosterValidator:
                 else:
                     emp_consecutive_days[emp_id] = 0
 
+        # Check against previously resolved conflicts to preserve manager overrides
+        for c in conflicts:
+            key = (c.date, c.brand_id, c.process_id, c.employee_id, c.severity)
+            if key in resolved_lookup:
+                c.resolved = True
+                c.resolution_notes = resolved_lookup[key]
+
+        # Deduplicate conflicts before saving
+        unique_conflicts = []
+        seen = set()
+        for c in conflicts:
+            k = (c.roster_id, c.date, c.brand_id, c.process_id, c.employee_id, c.severity, c.explanation)
+            if k not in seen:
+                seen.add(k)
+                unique_conflicts.append(c)
+
         # Save all conflicts
-        self.db.bulk_save_objects(conflicts)
+        self.db.bulk_save_objects(unique_conflicts)
 
         # Calculate coverage percentage
         coverage_pct = round((covered_required_slots / total_required_slots * 100), 2) if total_required_slots > 0 else 100.0
 
-        # Determine Roster Status
-        critical_count = sum(1 for c in conflicts if c.severity == "CRITICAL")
-        warning_count = sum(1 for c in conflicts if c.severity == "WARNING")
+        # Determine Roster Status (only unresolved critical conflicts require attention)
+        critical_count = sum(1 for c in unique_conflicts if c.severity == "CRITICAL" and not c.resolved)
+        warning_count = sum(1 for c in unique_conflicts if c.severity == "WARNING" and not c.resolved)
 
         if critical_count > 0:
             roster.status = "Needs Attention"

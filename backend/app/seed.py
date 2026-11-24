@@ -188,7 +188,7 @@ def seed_database(db: Session = None):
         for idx, b in enumerate(brands):
             mode = operating_modes[idx % len(operating_modes)]
             # Assign rules for CS, ACC, NDR for this brand
-            for p_idx, proc in enumerate([cs_proc, acc_proc, processes[3], om_proc]):
+            for p_idx, proc in enumerate([cs_proc, acc_proc, processes[3]]):
                 # If UrbanNest, let's make CS 365_DAYS, ACC DAILY_EXCEPT_HOLIDAYS, NDR SUNDAYS_AND_HOLIDAYS_OFF to demonstrate process-specific overrides!
                 proc_mode = mode
                 if b.code == "UNEST":

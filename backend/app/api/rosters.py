@@ -1,4 +1,5 @@
 import calendar
+import json
 from datetime import date, datetime
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -234,11 +235,117 @@ def validate_roster(id: int, db: Session = Depends(get_db)):
     result = validator.validate_roster(id)
     return result
 
+@router.post("/{id}/clear-conflicts")
+def clear_roster_conflicts(id: int, db: Session = Depends(get_db)):
+    """
+    Clears all un-resolved validation conflict records for this roster.
+    Preserves all employee, brand, process, assignment, leave, and holiday data.
+    """
+    roster = db.query(Roster).filter(Roster.id == id).first()
+    if not roster:
+        raise HTTPException(status_code=404, detail="Roster not found")
+
+    deleted_count = db.query(SchedulingConflict).filter(
+        SchedulingConflict.roster_id == id,
+        SchedulingConflict.resolved == False
+    ).delete()
+
+    roster.validation_status = "Pending"
+    if roster.status != "Published":
+        roster.status = "Draft"
+
+    db.add(AuditLog(
+        roster_id=id,
+        action="CLEAR_VALIDATION_RESULTS",
+        new_value=f"Cleared {deleted_count} stale conflict records",
+        modified_by="Operations Lead",
+        reason="Manual clearing of validation results"
+    ))
+    db.commit()
+    db.refresh(roster)
+    return {
+        "success": True,
+        "message": f"Successfully cleared {deleted_count} conflict records.",
+        "roster": _enrich_roster_out(roster, db)
+    }
+
+@router.post("/{id}/reset-draft")
+def reset_draft_roster(id: int, db: Session = Depends(get_db)):
+    """
+    Resets the draft roster assignments and conflicts.
+    Rejects resetting a published roster to preserve audit history and immutability.
+    """
+    roster = db.query(Roster).filter(Roster.id == id).first()
+    if not roster:
+        raise HTTPException(status_code=404, detail="Roster not found")
+
+    if roster.status == "Published":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot reset a published roster. Published rosters are immutable operational records."
+        )
+
+    del_assignments = db.query(RosterAssignment).filter(RosterAssignment.roster_id == id).delete()
+    del_conflicts = db.query(SchedulingConflict).filter(SchedulingConflict.roster_id == id).delete()
+
+    roster.status = "Draft"
+    roster.validation_status = "Pending"
+
+    db.add(AuditLog(
+        roster_id=id,
+        action="RESET_DRAFT_ROSTER",
+        new_value=f"Removed {del_assignments} assignments and {del_conflicts} conflicts",
+        modified_by="Operations Lead",
+        reason="Reset draft to empty baseline"
+    ))
+    db.commit()
+    db.refresh(roster)
+    return {
+        "success": True,
+        "message": "Draft roster successfully reset.",
+        "roster": _enrich_roster_out(roster, db)
+    }
+
+@router.post("/{id}/regenerate")
+def regenerate_roster(id: int, generated_by: str = "Operations Lead", db: Session = Depends(get_db)):
+    """
+    Regenerates assignments for this draft roster and re-validates.
+    Rejects regenerating a published roster.
+    """
+    roster = db.query(Roster).filter(Roster.id == id).first()
+    if not roster:
+        raise HTTPException(status_code=404, detail="Roster not found")
+
+    if roster.status == "Published":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot regenerate a published roster. Please generate a new draft version instead."
+        )
+
+    engine = RosterSchedulerEngine(db)
+    engine.regenerate_roster(roster, generated_by=generated_by)
+
+    db.add(AuditLog(
+        roster_id=id,
+        action="REGENERATE_DRAFT",
+        new_value=f"Regenerated roster assignments for month {roster.month}/{roster.year}",
+        modified_by=generated_by,
+        reason="Manual draft regeneration"
+    ))
+    db.commit()
+    db.refresh(roster)
+    return {
+        "success": True,
+        "message": "Draft roster regenerated and validated.",
+        "roster": _enrich_roster_out(roster, db)
+    }
+
 @router.post("/{id}/publish")
 def publish_roster(id: int, published_by: str = "Operations Lead", db: Session = Depends(get_db)):
     """
     Publishes the roster.
     Enforces Rule: A roster with critical unresolved conflicts CANNOT be published.
+    Creates an immutable RosterVersion snapshot to preserve history.
     """
     roster = db.query(Roster).filter(Roster.id == id).first()
     if not roster:
@@ -259,11 +366,31 @@ def publish_roster(id: int, published_by: str = "Operations Lead", db: Session =
     roster.published_date = datetime.utcnow()
     roster.published_by = published_by
 
+    # Create immutable version snapshot
+    assignments = db.query(RosterAssignment).filter(RosterAssignment.roster_id == id).all()
+    snap_list = [
+        {
+            "id": a.id, "employee_id": a.employee_id, "date": a.date.isoformat(),
+            "brand_id": a.brand_id, "process_id": a.process_id, "work_status": a.work_status,
+            "shift_start": a.shift_start, "shift_end": a.shift_end, "notes": a.notes
+        }
+        for a in assignments
+    ]
+    rv = RosterVersion(
+        roster_id=id,
+        version=roster.version,
+        snapshot_data=json.dumps(snap_list),
+        created_at=datetime.utcnow(),
+        created_by=published_by,
+        notes=f"Published snapshot with {val_result['coverage_percentage']}% coverage ({val_result['warnings_count']} warnings)"
+    )
+    db.add(rv)
+
     # Audit log
     audit = AuditLog(
         roster_id=id,
         action="ROSTER_PUBLISHED",
-        new_value=f"Published with {val_result['coverage_percentage']}% coverage",
+        new_value=f"Published Version {roster.version} with {val_result['coverage_percentage']}% coverage",
         modified_by=published_by,
         reason="Approved by operations lead"
     )
@@ -362,6 +489,10 @@ def get_roster_conflicts(
     severity: Optional[str] = None,
     brand_id: Optional[int] = None,
     process_id: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    pod_id: Optional[int] = None,
+    category: Optional[str] = None,
+    resolved: Optional[bool] = None,
     db: Session = Depends(get_db)
 ):
     query = db.query(SchedulingConflict).filter(SchedulingConflict.roster_id == id)
@@ -371,6 +502,35 @@ def get_roster_conflicts(
         query = query.filter(SchedulingConflict.brand_id == brand_id)
     if process_id:
         query = query.filter(SchedulingConflict.process_id == process_id)
+    if employee_id:
+        query = query.filter(SchedulingConflict.employee_id == employee_id)
+    if resolved is not None:
+        query = query.filter(SchedulingConflict.resolved == resolved)
+
+    if pod_id:
+        query = query.join(Employee, SchedulingConflict.employee_id == Employee.id, isouter=True)
+        query = query.join(Brand, SchedulingConflict.brand_id == Brand.id, isouter=True)
+        query = query.filter((Employee.pod_id == pod_id) | (Brand.assigned_pod_id == pod_id))
+
+    if category:
+        cat_lower = category.lower()
+        if "cover" in cat_lower or "gap" in cat_lower:
+            query = query.filter(SchedulingConflict.explanation.ilike("%coverage%"))
+        elif "leave" in cat_lower or "avail" in cat_lower or "comp" in cat_lower:
+            query = query.filter(
+                (SchedulingConflict.explanation.ilike("%leave%")) |
+                (SchedulingConflict.explanation.ilike("%comp-off%")) |
+                (SchedulingConflict.explanation.ilike("%unavailab%"))
+            )
+        elif "off" in cat_lower or "weekly" in cat_lower:
+            query = query.filter(SchedulingConflict.explanation.ilike("%weekly off%"))
+        elif "double" in cat_lower or "book" in cat_lower:
+            query = query.filter(SchedulingConflict.explanation.ilike("%double-booking%"))
+        elif "workload" in cat_lower or "consec" in cat_lower:
+            query = query.filter(
+                (SchedulingConflict.explanation.ilike("%workload%")) |
+                (SchedulingConflict.explanation.ilike("%consecutive%"))
+            )
 
     conflicts = query.order_by(SchedulingConflict.severity.asc(), SchedulingConflict.date.asc()).all()
     results = []

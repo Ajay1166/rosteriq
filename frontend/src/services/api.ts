@@ -33,7 +33,10 @@ export const api = {
   publishRoster: (id: number, publishedBy: string = 'Operations Lead') =>
     client.post(`/rosters/${id}/publish`, null, { params: { published_by: publishedBy } }).then(res => res.data),
   getRosterCoverage: (id: number) => client.get(`/rosters/${id}/coverage`).then(res => res.data),
-  getRosterConflicts: (id: number, params?: { severity?: string; brand_id?: number; process_id?: number }): Promise<SchedulingConflict[]> =>
+  clearRosterConflicts: (id: number) => client.post(`/rosters/${id}/clear-conflicts`).then(res => res.data),
+  resetDraftRoster: (id: number) => client.post(`/rosters/${id}/reset-draft`).then(res => res.data),
+  regenerateRoster: (id: number, generatedBy?: string) => client.post(`/rosters/${id}/regenerate`, null, { params: { generated_by: generatedBy } }).then(res => res.data),
+  getRosterConflicts: (id: number, params?: { severity?: string; brand_id?: number; process_id?: number; employee_id?: number; pod_id?: number; category?: string; resolved?: boolean }): Promise<SchedulingConflict[]> =>
     client.get(`/rosters/${id}/conflicts`, { params }).then(res => res.data),
   resolveConflict: (rosterId: number, conflictId: number, notes?: string) =>
     client.post(`/rosters/${rosterId}/conflicts/${conflictId}/resolve`, null, { params: { notes } }).then(res => res.data),
