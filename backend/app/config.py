@@ -8,12 +8,14 @@ class Settings:
     # Database
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./rosteriq.db")
     
-    # Fix for SQLAlchemy PostgreSQL url (render / supabase usually uses postgres:// instead of postgresql://)
+    # Fix for SQLAlchemy PostgreSQL url (render / supabase usually uses postgres:// or postgresql://)
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
         url = self.DATABASE_URL
         if url.startswith("postgres://"):
-            url = url.replace("postgres://", "postgresql://", 1)
+            url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+        elif url.startswith("postgresql://") and not url.startswith("postgresql+"):
+            url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
         return url
 
     # CORS
